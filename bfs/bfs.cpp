@@ -38,31 +38,50 @@ void bitmap_init(bitmap* bm, int count) {
 void top_down_step(
     Graph g,
     vertex_set* old_frontier,
-    vertex_set* new_frontier,
+    vertex_set* new_frontier_global,
     int* distances) {
   int i;
-#pragma omp parallel for schedule(dynamic, 16)
-  for (i = 0; i < old_frontier->count; i++) {
-    int node = old_frontier->vertices[i];
-    const Vertex* neighbor_begin = outgoing_begin(g, node);
-    const Vertex* neighbor_end = outgoing_end(g, node);
-    // attempt to add all neighbors to the new frontier
-    const int neighbors_dis = distances[node] + 1;
-    for (const Vertex* neighbor_ptr = neighbor_begin;
-         neighbor_ptr < neighbor_end;
-         neighbor_ptr++) {
-      int neighbor = *neighbor_ptr;
-      if (distances[neighbor] != NOT_VISITED_MARKER) continue;
-      // the following operation should be atomic
-      if (__sync_bool_compare_and_swap(
-              &distances[neighbor], NOT_VISITED_MARKER, neighbors_dis)) {
-        // the neighbor was not visited, but now it is.
-        // now add the neighbor to the frontier.
-        int index;
-#pragma omp atomic capture
-        index = new_frontier->count++;
-        new_frontier->vertices[index] = neighbor;
+#pragma omp parallel
+  {
+    vertex_set new_frontier_;
+    vertex_set* new_frontier = &new_frontier_;
+    vertex_set_init(new_frontier, g->num_nodes);
+#pragma omp for
+    for (i = 0; i < old_frontier->count; i++) {
+      int node = old_frontier->vertices[i];
+      const Vertex* neighbor_begin = outgoing_begin(g, node);
+      const Vertex* neighbor_end = outgoing_end(g, node);
+      // attempt to add all neighbors to the new frontier
+      const int neighbors_dis = distances[node] + 1;
+      for (const Vertex* neighbor_ptr = neighbor_begin;
+           neighbor_ptr < neighbor_end;
+           neighbor_ptr++) {
+        int neighbor = *neighbor_ptr;
+        if (distances[neighbor] != NOT_VISITED_MARKER) continue;
+        // the following operation should be atomic
+        if (__sync_bool_compare_and_swap(
+                &distances[neighbor], NOT_VISITED_MARKER, neighbors_dis)) {
+          // the neighbor was not visited, but now it is.
+          // now add the neighbor to the frontier.
+          int index;
+          index = new_frontier->count++;
+          new_frontier->vertices[index] = neighbor;
+        }
       }
+    }
+    // Concat the private frontier into the global one.
+    int reserved_global_begin;
+#pragma omp atomic capture
+    {
+      reserved_global_begin = new_frontier_global->count;
+      new_frontier_global->count += new_frontier->count;
+    }
+    // Populate the reserved frontier.
+    int j;
+#pragma omp parallel for
+    for (j = 0; j < new_frontier->count; j++) {
+      new_frontier_global->vertices[reserved_global_begin + j] =
+          new_frontier->vertices[j];
     }
   }
 }
@@ -114,7 +133,7 @@ int bottom_up_step(
   int new_frontier_size = 0;
   // Iterate over unvesisited nodes
   int node;
-#pragma omp parallel for schedule(dynamic, 256)
+#pragma omp parallel for reduction(+ : new_frontier_size)
   for (node = 0; node < g->num_nodes; node++) {
     if (distances[node] != NOT_VISITED_MARKER) continue;
     // Check if node has an edge into the frontier.
@@ -132,7 +151,6 @@ int bottom_up_step(
       // If it's visited now, add it to the new frontier.
       distances[node] = distances[*parent_ptr] + 1;
       new_frontier_bm->bits[node] = true;
-#pragma omp atomic update
       new_frontier_size++;
     }
   }
