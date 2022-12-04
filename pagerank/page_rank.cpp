@@ -1,61 +1,76 @@
 #include "page_rank.h"
 
-#include <stdlib.h>
-#include <cmath>
 #include <omp.h>
+#include <stdlib.h>
+
+#include <cmath>
 #include <utility>
 
 #include "../common/CycleTimer.h"
 #include "../common/graph.h"
 
-
 // pageRank --
 //
 // g:           graph to process (see common/graph.h)
-// solution:    array of per-vertex vertex scores (length of array is num_nodes(g))
-// damping:     page-rank algorithm's damping parameter
+// solution:    array of per-vertex vertex scores (length of array is
+// num_nodes(g)) damping:     page-rank algorithm's damping parameter
 // convergence: page-rank algorithm's convergence threshold
 //
-void pageRank(Graph g, double* solution, double damping, double convergence)
-{
-
-
-  // initialize vertex weights to uniform probability. Double
-  // precision scores are used to avoid underflow for large graphs
-
+void pageRank(Graph g, double* solution, double damping, double convergence) {
   int numNodes = num_nodes(g);
+  const double dampingOffset = (1.0 - damping) / numNodes;
+  double* scoresOdd = (double*)malloc(numNodes * sizeof(double));
+  double* scoresEven = (double*)malloc(numNodes * sizeof(double));
+  double* scoresArrays[2] = {scoresEven, scoresOdd};
   double equal_prob = 1.0 / numNodes;
   for (int i = 0; i < numNodes; ++i) {
-    solution[i] = equal_prob;
+    scoresEven[i] = equal_prob;
   }
-  
-  
-  /*
-     CS149 students: Implement the page rank algorithm here.  You
-     are expected to parallelize the algorithm using openMP.  Your
-     solution may need to allocate (and free) temporary arrays.
 
-     Basic page rank pseudocode is provided below to get you started:
+  bool converged = false;
+  int iters = 1;
+  while (!converged) {
+    double* scoresOld = scoresArrays[(iters - 1) % 2];
+    double* scoresNew = scoresArrays[iters % 2];
 
-     // initialization: see example code above
-     score_old[vi] = 1/numNodes;
+    double deadendOffset = 0;
+    // Perf: this loop doesn't make a difference.
+    // #pragma omp parallel for schedule(dynamic, 256) reduction(+ :
+    // deadendOffset)
+    for (int vi = 0; vi < numNodes; vi++) {
+      if (outgoing_size(g, vi) == 0) {
+        deadendOffset += damping * scoresOld[vi] / numNodes;
+      }
+    }
 
-     while (!converged) {
+    double globalDiff = 0;
+    int vi;
+#pragma omp parallel for schedule(dynamic, 256) reduction(+ : globalDiff)
+    for (vi = 0; vi < numNodes; vi++) {
+      double newScore = 0;
+      const Vertex* incomingStart = incoming_begin(g, vi);
+      const Vertex* incomingEnd = incoming_end(g, vi);
+      const Vertex* vj;
+      // #pragma omp parallel for schedule(static, 80) reduction(+ : newScore)
+      for (vj = incomingStart; vj != incomingEnd; vj++) {
+        newScore += scoresOld[*vj] / outgoing_size(g, *vj);
+      }
 
-       // compute score_new[vi] for all nodes vi:
-       score_new[vi] = sum over all nodes vj reachable from incoming edges
-                          { score_old[vj] / number of edges leaving vj  }
-       score_new[vi] = (damping * score_new[vi]) + (1.0-damping) / numNodes;
+      newScore = damping * newScore + dampingOffset;
 
-       score_new[vi] += sum over all nodes v in graph with no outgoing edges
-                          { damping * score_old[v] / numNodes }
+      newScore += deadendOffset;
 
-       // compute how much per-node scores have changed
-       // quit once algorithm has converged
+      // Update diff
+      scoresNew[vi] = newScore;
+      globalDiff += abs(newScore - scoresOld[vi]);
+    }
 
-       global_diff = sum over all nodes vi { abs(score_new[vi] - score_old[vi]) };
-       converged = (global_diff < convergence)
-     }
-
-   */
+    converged = globalDiff < convergence;
+    iters++;
+  }
+  double* scores = scoresArrays[(iters - 1) % 2];
+  // Perf: doesn't make a difference
+  memcpy(solution, scores, sizeof(double) * numNodes);
+  free(scoresOdd);
+  free(scoresEven);
 }
